@@ -21,11 +21,53 @@ def terminate_connection() -> None:
 
 
 def get_available_symbols() -> List[str]:
+    """Return list of forex majors/minors, metals (XAU/XAG), and select crypto (BTC/ETH).
+    
+    Filters for:
+    - Major/minor forex pairs (e.g., EURUSD, GBPJPY)
+    - XAGUSD (silver), XAUUSD (gold)
+    - BTCUSD, ETHUSD
+    
+    Works with both legacy brokers (FX suffix/path) and modern ones (Zero\Forex\ path).
+    """
     symbols = mt5.symbols_get()
     if not symbols:
         return []
-    forex_pairs = [s.name for s in symbols if 'FX' in getattr(s, 'path', '') or s.name.endswith('FX')]
-    return forex_pairs
+    
+    # Define forex majors and minors base pairs (without suffixes)
+    forex_base = [
+        'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD',  # Majors
+        'EURGBP', 'EURJPY', 'EURCHF', 'EURAUD', 'EURCAD', 'EURNZD',  # EUR crosses
+        'GBPJPY', 'GBPCHF', 'GBPAUD', 'GBPCAD', 'GBPNZD',  # GBP crosses
+        'AUDJPY', 'AUDCHF', 'AUDCAD', 'AUDNZD',  # AUD crosses
+        'NZDJPY', 'NZDCHF', 'NZDCAD',  # NZD crosses
+        'CADJPY', 'CADCHF', 'CHFJPY',  # Other crosses
+    ]
+    
+    # Metals and crypto
+    special_instruments = ['XAGUSD', 'XAUUSD', 'BTCUSD', 'ETHUSD']
+    
+    # Combined whitelist (case-insensitive base matching)
+    whitelist = set(s.upper() for s in forex_base + special_instruments)
+    
+    filtered = []
+    for sym in symbols:
+        name = sym.name
+        path = getattr(sym, 'path', '')
+        
+        # Legacy broker pattern: contains 'FX' in path or ends with 'FX'
+        if 'FX' in path or name.endswith('FX'):
+            filtered.append(name)
+            continue
+        
+        # Modern broker pattern: check if base symbol (without suffix) is in our whitelist
+        # Remove common suffixes: 'z', 'm', '.a', etc.
+        base_name = name.rstrip('zm').rstrip('.a').rstrip('.m').upper()
+        
+        if base_name in whitelist:
+            filtered.append(name)
+    
+    return filtered
 
 
 def fetch_daily_candles(symbol: str, days: int = 5):
@@ -36,7 +78,28 @@ def fetch_daily_candles(symbol: str, days: int = 5):
             return None
         df = pd.DataFrame(rates)
         df['time'] = pd.to_datetime(df['time'], unit='s')
-        return df
+        return df.sort_values('time').reset_index(drop=True)
+    except Exception:
+        return None
+
+
+def fetch_daily_candles_range(symbol: str, start: datetime, end: datetime):
+    """Return pandas.DataFrame of D1 candles in [start, end], best-effort.
+
+    Notes:
+    - MT5 daily candle timestamps are broker-time anchored; this fetch is a practical filter.
+    - For date-only inputs, callers should pass end as the date's midnight and we will
+      include the full end day by extending end by 1 day.
+    """
+    try:
+        start_dt = pd.to_datetime(start).to_pydatetime().replace(microsecond=0)
+        end_dt = pd.to_datetime(end).to_pydatetime().replace(microsecond=0) + timedelta(days=1)
+        rates = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_D1, start_dt, end_dt)
+        if rates is None or len(rates) == 0:
+            return None
+        df = pd.DataFrame(rates)
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        return df.sort_values('time').reset_index(drop=True)
     except Exception:
         return None
 
@@ -85,14 +148,32 @@ def get_directional_m5_slice(m5_df: pd.DataFrame, pattern_type: str) -> pd.DataF
 
     return m5_df.loc[idx:].reset_index(drop=True)
 
-def scan_all(min_candle_size_pips: int,
-             lookback_days: int,
-             on_progress: Callable[[str], None],
-             on_found: Callable[[Dict], None],
-             stop_event: threading.Event,
-             fetch_m5_data: bool = False) -> List[Dict]:
+def scan_all(
+    min_candle_size_pips: int,
+    *args,
+    lookback_days: int | None = None,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    fetch_m5_data: bool = False,
+) -> List[Dict]:
     """Scan all symbols and call callbacks on progress and when patterns found."""
     patterns: List[Dict] = []
+
+    # Backward compatible argument parsing.
+    # Supported call styles:
+    # - scan_all(min_pips, lookback_days, on_progress, on_found, stop_event)
+    # - scan_all(min_pips, on_progress, on_found, stop_event)  (older GUIs)
+    if len(args) == 3:
+        on_progress, on_found, stop_event = args
+        lookback_days = int(lookback_days or 5)
+    elif len(args) >= 4 and isinstance(args[0], int):
+        lookback_days = int(args[0])
+        on_progress, on_found, stop_event = args[1], args[2], args[3]
+    else:
+        raise TypeError(
+            "scan_all expects either (min_pips, lookback_days, on_progress, on_found, stop_event) "
+            "or (min_pips, on_progress, on_found, stop_event)"
+        )
 
     if not initialize_connection():
         on_progress('MT5 init failed')
@@ -110,7 +191,10 @@ def scan_all(min_candle_size_pips: int,
                 break
             on_progress(f"Scanning {idx}/{len(symbols)}: {symbol}")
 
-            df = fetch_daily_candles(symbol, days=lookback_days)
+            if start_date is not None and end_date is not None:
+                df = fetch_daily_candles_range(symbol, start=start_date, end=end_date)
+            else:
+                df = fetch_daily_candles(symbol, days=int(lookback_days or 5))
             if df is None or len(df) < 2:
                 continue
 

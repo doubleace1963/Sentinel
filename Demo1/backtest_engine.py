@@ -269,6 +269,10 @@ def monitor_trade_on_c3(
             pips = _price_diff_to_pips(symbol, price_diff)
             result['pips'] = float(pips) if pips is not None else float(price_diff)
             result['r_multiple'] = -1.0
+            # Store potential R if TP had been hit
+            sl_distance = abs(entry_price - stop_loss)
+            tp_distance = abs(take_profit - entry_price)
+            result['potential_r'] = tp_distance / sl_distance if sl_distance > 0 else 0.0
             break
         elif outcome == 'win':
             result['exit_time'] = candle['time']
@@ -358,6 +362,10 @@ def monitor_trade_extended(
             pips = _price_diff_to_pips(symbol, price_diff)
             result['pips'] = float(pips) if pips is not None else float(price_diff)
             result['r_multiple'] = -1.0
+            # Store potential R if TP had been hit
+            sl_distance = abs(entry_price - stop_loss)
+            tp_distance = abs(take_profit - entry_price)
+            result['potential_r'] = tp_distance / sl_distance if sl_distance > 0 else 0.0
             break
         elif outcome == 'win':
             result['exit_time'] = candle['time']

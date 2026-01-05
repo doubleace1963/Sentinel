@@ -8,11 +8,12 @@ import pandas as pd
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 from typing import List, Dict, Tuple
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
 from matplotlib.patches import Rectangle
 
 import mt5_core as mt5_core
@@ -510,7 +511,24 @@ def show_backtest_results(results: List[Dict], stats: Dict):
     """Display backtest results in a new window."""
     result_window = tk.Toplevel()
     result_window.title('Backtest Results')
-    result_window.geometry('900x600')
+    result_window.geometry('900x750')
+    
+    # Calculate R-multiple distribution for wins and losses
+    winning_trades = [r for r in results if r.get('outcome') == 'win' and r.get('r_multiple') is not None]
+    losing_trades = [r for r in results if r.get('outcome') == 'loss' and r.get('r_multiple') is not None]
+    
+    # Classify winning trades by R achieved
+    wins_0_1 = sum(1 for t in winning_trades if 0 <= t['r_multiple'] < 1)
+    wins_1_3 = sum(1 for t in winning_trades if 1 <= t['r_multiple'] < 3)
+    wins_3_6 = sum(1 for t in winning_trades if 3 <= t['r_multiple'] < 6)
+    wins_6_plus = sum(1 for t in winning_trades if t['r_multiple'] >= 6)
+    
+    # For losing trades, show what their potential R was (i.e., if they had won)
+    # The potential R is stored as 'potential_r' in backtest results
+    losses_0_1 = sum(1 for t in losing_trades if t.get('potential_r', 0) < 1)
+    losses_1_3 = sum(1 for t in losing_trades if 1 <= t.get('potential_r', 0) < 3)
+    losses_3_6 = sum(1 for t in losing_trades if 3 <= t.get('potential_r', 0) < 6)
+    losses_6_plus = sum(1 for t in losing_trades if t.get('potential_r', 0) >= 6)
     
     # Statistics Frame
     stats_frame = ttk.LabelFrame(result_window, text='Statistics', padding=10)
@@ -534,6 +552,22 @@ Total R: {stats.get('total_r', 0):.2f}R
 Total Pips: {stats.get('total_pips', 0):.1f}
 Average Pips per Trade: {stats.get('average_pips', 0):.1f}
 Average Hours Held: {stats.get('avg_hours_held', 0):.1f}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+WINNING TRADES R-MULTIPLE DISTRIBUTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+0-1R:    {wins_0_1:3d} trades ({(wins_0_1/len(winning_trades)*100) if winning_trades else 0:.1f}%)
+1-3R:    {wins_1_3:3d} trades ({(wins_1_3/len(winning_trades)*100) if winning_trades else 0:.1f}%)
+3-6R:    {wins_3_6:3d} trades ({(wins_3_6/len(winning_trades)*100) if winning_trades else 0:.1f}%)
+6+R:     {wins_6_plus:3d} trades ({(wins_6_plus/len(winning_trades)*100) if winning_trades else 0:.1f}%)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+LOSING TRADES - POTENTIAL R IF WON
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+0-1R:    {losses_0_1:3d} trades ({(losses_0_1/len(losing_trades)*100) if losing_trades else 0:.1f}%)
+1-3R:    {losses_1_3:3d} trades ({(losses_1_3/len(losing_trades)*100) if losing_trades else 0:.1f}%)
+3-6R:    {losses_3_6:3d} trades ({(losses_3_6/len(losing_trades)*100) if losing_trades else 0:.1f}%)
+6+R:     {losses_6_plus:3d} trades ({(losses_6_plus/len(losing_trades)*100) if losing_trades else 0:.1f}%)
     """
     
     stats_label = ttk.Label(stats_frame, text=stats_text, justify='left', font=('Courier', 10))
@@ -575,7 +609,7 @@ Average Hours Held: {stats.get('avg_hours_held', 0):.1f}
         
         # Run simulation
         initial_balance = 5000
-        risk_pct = 5.0
+        risk_pct = 1.0
         equity_curve, trade_results = virtual_account.simulate_virtual_account(
             trade_data, initial_balance, risk_pct
         )
@@ -596,14 +630,46 @@ Average Hours Held: {stats.get('avg_hours_held', 0):.1f}
         
         sim_window.title('Virtual Account Simulation')
         
-        # Position window offset from the backtest window (100 pixels right and down)
-        sim_window.geometry('1200x800+100+100')
+        # Larger window by default (chart is tall)
+        sim_window.geometry('1200x950+100+80')
         
         print(f"[DEBUG] Window configured at position +100+100, starting to add widgets")
         
+        # Scrollable container (so large charts + stats remain usable on smaller screens)
+        container = ttk.Frame(sim_window)
+        container.pack(fill='both', expand=True)
+
+        scroll_canvas = tk.Canvas(container, highlightthickness=0)
+        vscroll = ttk.Scrollbar(container, orient='vertical', command=scroll_canvas.yview)
+        scroll_canvas.configure(yscrollcommand=vscroll.set)
+
+        vscroll.pack(side='right', fill='y')
+        scroll_canvas.pack(side='left', fill='both', expand=True)
+
+        content = ttk.Frame(scroll_canvas)
+        content_window = scroll_canvas.create_window((0, 0), window=content, anchor='nw')
+
+        def _on_content_configure(_event=None):
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox('all'))
+
+        def _on_canvas_configure(event):
+            # Keep the content frame the same width as the visible area
+            scroll_canvas.itemconfigure(content_window, width=event.width)
+
+        content.bind('<Configure>', _on_content_configure)
+        scroll_canvas.bind('<Configure>', _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            # Windows: event.delta is typically +/-120 per notch
+            if event.delta:
+                scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+
+        # Bind mousewheel when cursor is over the window
+        sim_window.bind_all('<MouseWheel>', _on_mousewheel)
+
         # Statistics Frame
-        sim_stats_frame = ttk.LabelFrame(sim_window, text='Account Performance', padding=10)
-        sim_stats_frame.pack(fill='x', padx=10, pady=10)
+        sim_stats_frame = ttk.LabelFrame(content, text='Account Performance', padding=10)
+        sim_stats_frame.pack(fill='x', padx=10, pady=(10, 6))
         
         sim_stats_text = f"""
 Initial Balance: ${account_stats['initial_balance']:.2f}
@@ -623,59 +689,102 @@ Profit Factor: {account_stats['profit_factor']:.2f}
 Risk Per Trade: {risk_pct}% of current balance
         """
         
-        sim_stats_label = ttk.Label(sim_stats_frame, text=sim_stats_text, 
+        sim_stats_label = ttk.Label(sim_stats_frame, text=sim_stats_text,
                                      justify='left', font=('Courier', 10))
         sim_stats_label.pack()
         
         # Equity Curve Chart
-        chart_frame = ttk.LabelFrame(sim_window, text='Equity Curve', padding=10)
-        chart_frame.pack(fill='both', expand=True, padx=10, pady=10)
+        chart_frame = ttk.LabelFrame(content, text='Equity Curve', padding=10)
+        chart_frame.pack(fill='both', expand=True, padx=10, pady=(6, 10))
+
+        # A cleaner looking style without changing global matplotlib settings
+        with plt.style.context('seaborn-v0_8-darkgrid'):
+            fig, (ax, ax_dd) = plt.subplots(
+                2,
+                1,
+                figsize=(12, 9),
+                sharex=True,
+                gridspec_kw={'height_ratios': [3, 1]},
+            )
         
-        fig, ax = plt.subplots(figsize=(12, 7))
-        
-        # Extract timestamps and balances
-        timestamps = [point[0] for point in equity_curve]
-        balances = [point[1] for point in equity_curve]
-        
-        # Plot equity curve
-        ax.plot(timestamps, balances, linewidth=2, color='blue', label='Account Balance')
+        # Build plot series based on ENTRIES (not exits)
+        # Note: the balance changes are still realized after each trade, but we anchor them on entry timestamps
+        # to match the requested visualization.
+        plot_points = []
+        if trade_results:
+            first_entry = pd.to_datetime(trade_results[0].get('entry_time') or trade_results[0].get('exit_time'))
+            plot_points.append((first_entry, float(initial_balance)))
+            for t in trade_results:
+                ts = pd.to_datetime(t.get('entry_time') or t.get('exit_time'))
+                plot_points.append((ts, float(t.get('balance_after', initial_balance))))
+        else:
+            # Fallback: keep something valid for plotting
+            plot_points = [(pd.to_datetime(equity_curve[0][0]), float(equity_curve[0][1]))]
+
+        timestamps = [p[0] for p in plot_points]
+        balances = [p[1] for p in plot_points]
+
+        # Compute drawdown series (useful context)
+        peak = float(balances[0]) if balances else float(initial_balance)
+        dd_pct = []
+        dd_ts = []
+        for ts, bal in zip(timestamps, balances):
+            b = float(bal)
+            if b > peak:
+                peak = b
+            dd_ts.append(ts)
+            dd_pct.append(((b - peak) / peak) * 100 if peak > 0 else 0.0)
+
+        # Plot equity curve (anchored on entry timestamps)
+        ax.plot(timestamps, balances, linewidth=2.5, label='Account Balance')
         
         # Add horizontal line for initial balance
-        ax.axhline(y=initial_balance, color='gray', linestyle='--', 
-                   linewidth=1, label=f'Initial Balance (${initial_balance})')
+        ax.axhline(y=initial_balance, linestyle='--', linewidth=1.5, label=f'Initial Balance (${initial_balance})')
         
-        # Mark winning and losing trades
+        # Mark winning and losing trades (at entry timestamps)
         for trade in trade_results:
+            marker_time = pd.to_datetime(trade.get('entry_time') or trade.get('exit_time'))
             if trade['result'] == 'won':
-                ax.scatter(trade['exit_time'], trade['balance_after'], 
-                          color='green', s=50, alpha=0.6, marker='^', zorder=5)
+                ax.scatter(marker_time, trade['balance_after'],
+                           color='green', s=45, alpha=0.65, marker='^', zorder=5)
             else:
-                ax.scatter(trade['exit_time'], trade['balance_after'], 
-                          color='red', s=50, alpha=0.6, marker='v', zorder=5)
+                ax.scatter(marker_time, trade['balance_after'],
+                           color='red', s=45, alpha=0.65, marker='v', zorder=5)
         
         # Formatting
-        ax.set_xlabel('Date', fontsize=12)
         ax.set_ylabel('Account Balance ($)', fontsize=12)
         ax.set_title('Virtual Account Equity Curve', fontsize=14, fontweight='bold')
-        ax.grid(True, alpha=0.3)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        plt.xticks(rotation=45)
+        ax.yaxis.set_major_formatter(mticker.StrMethodFormatter('${x:,.0f}'))
+
+        # Drawdown subplot
+        ax_dd.fill_between(dd_ts, dd_pct, 0, alpha=0.25)
+        ax_dd.plot(dd_ts, dd_pct, linewidth=1.25)
+        ax_dd.set_ylabel('Drawdown %', fontsize=11)
+        ax_dd.yaxis.set_major_formatter(mticker.StrMethodFormatter('{x:.0f}%'))
+        ax_dd.axhline(0, linewidth=1)
+
+        locator = mdates.AutoDateLocator()
+        ax_dd.xaxis.set_major_locator(locator)
+        ax_dd.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        fig.autofmt_xdate()
         
         # Add custom legend
         from matplotlib.lines import Line2D
         custom_lines = [
-            Line2D([0], [0], color='blue', linewidth=2),
-            Line2D([0], [0], color='gray', linestyle='--', linewidth=1),
+            Line2D([0], [0], linewidth=2.5),
+            Line2D([0], [0], linestyle='--', linewidth=1.5),
             Line2D([0], [0], marker='^', color='w', markerfacecolor='green', markersize=8),
             Line2D([0], [0], marker='v', color='w', markerfacecolor='red', markersize=8)
         ]
         ax.legend(custom_lines, ['Equity Curve', f'Initial (${initial_balance})', 
                                  'Win', 'Loss'], loc='upper left')
-        
+
         fig.tight_layout()
-        
+
         canvas = FigureCanvasTkAgg(fig, master=chart_frame)
+        toolbar = NavigationToolbar2Tk(canvas, chart_frame)
+        toolbar.update()
+
         canvas.draw()
         canvas.get_tk_widget().pack(fill='both', expand=True)
         
@@ -764,17 +873,27 @@ def create_gui() -> tk.Tk:
     min_entry = ttk.Entry(frm, textvariable=min_pips_var, width=10)
     min_entry.grid(row=0, column=1, padx=6)
 
-    ttk.Label(frm, text='Lookback days:').grid(row=1, column=0, sticky='w')
-    lookback_days_var = tk.StringVar(value=str(DEFAULT_LOOKBACK_DAYS))
-    lookback_entry = ttk.Entry(frm, textvariable=lookback_days_var, width=10)
-    lookback_entry.grid(row=1, column=1, padx=6)
+    # Date range inputs (dates only)
+    today = datetime.now().date()
+    default_start = (today - timedelta(days=DEFAULT_LOOKBACK_DAYS)).strftime('%Y-%m-%d')
+    default_end = today.strftime('%Y-%m-%d')
+
+    ttk.Label(frm, text='Start date (YYYY-MM-DD):').grid(row=1, column=0, sticky='w')
+    start_date_var = tk.StringVar(value=default_start)
+    start_entry = ttk.Entry(frm, textvariable=start_date_var, width=14)
+    start_entry.grid(row=1, column=1, padx=6, sticky='w')
+
+    ttk.Label(frm, text='End date (YYYY-MM-DD):').grid(row=2, column=0, sticky='w')
+    end_date_var = tk.StringVar(value=default_end)
+    end_entry = ttk.Entry(frm, textvariable=end_date_var, width=14)
+    end_entry.grid(row=2, column=1, padx=6, sticky='w')
 
     status_var = tk.StringVar(value='Idle')
     status_lbl = ttk.Label(frm, textvariable=status_var)
-    status_lbl.grid(row=0, column=2, padx=10, rowspan=2)
+    status_lbl.grid(row=0, column=2, padx=10, rowspan=3)
 
     btn_frame = ttk.Frame(frm)
-    btn_frame.grid(row=0, column=3, padx=6, rowspan=2)
+    btn_frame.grid(row=0, column=3, padx=6, rowspan=3)
 
     start_btn = ttk.Button(btn_frame, text='Start Scan')
     stop_btn = ttk.Button(btn_frame, text='Stop', state='disabled')
@@ -855,14 +974,16 @@ def create_gui() -> tk.Tk:
         except ValueError:
             messagebox.showerror('Input error', 'Min pips must be an integer')
             return
-        
+
         try:
-            lookback_days = int(lookback_days_var.get())
-            if lookback_days < 2:
-                messagebox.showerror('Input error', 'Lookback days must be at least 2')
-                return
+            start_dt = datetime.strptime(start_date_var.get().strip(), '%Y-%m-%d')
+            end_dt = datetime.strptime(end_date_var.get().strip(), '%Y-%m-%d')
         except ValueError:
-            messagebox.showerror('Input error', 'Lookback days must be an integer')
+            messagebox.showerror('Input error', 'Dates must be in YYYY-MM-DD format')
+            return
+
+        if start_dt > end_dt:
+            messagebox.showerror('Input error', 'Start date must be <= end date')
             return
 
         for i in tree.get_children():
@@ -877,7 +998,7 @@ def create_gui() -> tk.Tk:
         status_var.set('Initializing...')
 
         def worker():
-            mt5_core.scan_all(min_pips, lookback_days, on_progress, on_found, stop_event)
+            mt5_core.scan_all(min_pips, on_progress, on_found, stop_event, start_date=start_dt, end_date=end_dt)
             root.after(0, lambda: start_btn.config(state='normal'))
             root.after(0, lambda: stop_btn.config(state='disabled'))
 
